@@ -1,0 +1,122 @@
+services:
+  # ============================================================================
+  # 3. LDAP SERVICE (OpenLDAP + phpLDAPadmin)
+  # ============================================================================
+  openldap:
+    build:
+      context: ./LDAP
+      dockerfile: Dockerfile
+    container_name: security_openldap
+    hostname: ldap.example.com
+    environment:
+      LDAP_ORGANISATION: "Example Corp"
+      LDAP_DOMAIN: "example.com"
+      LDAP_ADMIN_PASSWORD: "${LDAP_ADMIN_PASSWORD:-adminpassword}"
+    ports:
+      - "389:389"
+      - "636:636"
+    volumes:
+      - ldap_data:/var/lib/ldap
+      - ldap_config:/etc/ldap/slapd.d
+      - secrets_data:/secrets
+    networks:
+      - security-network
+    restart: unless-stopped
+
+  phpldapadmin:
+    image: osixia/phpldapadmin:latest
+    container_name: security_phpldapadmin
+    hostname: phpldapadmin
+    environment:
+      PHPLDAPADMIN_LDAP_HOSTS: "openldap"
+      PHPLDAPADMIN_HTTPS: "false"
+    ports:
+      - "8081:80"
+    depends_on:
+      - openldap
+    networks:
+      - security-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # 2. BACKEND SERVICE (Flask API + SQLite AES-256 + LDAP Client)
+  # ============================================================================
+  backend:
+    build:
+      context: ./Backend
+      dockerfile: Dockerfile
+    container_name: security_backend
+    environment:
+      - API_SECRET=${API_SECRET:-LAB_INITIAL_SECRET_ABC123}
+      - DATABASE_ENCRYPTION_KEY=${DATABASE_ENCRYPTION_KEY:-LAB_ENCRYPTION_KEY_FIXED_2026_DO_NOT_ROTATE}
+      - DB_PATH=/data/app.db
+      - LDAP_HOST=openldap
+      - LDAP_PORT=389
+      - LDAP_BASE_DN=dc=example,dc=com
+      - LDAP_ADMIN_PASSWORD=${LDAP_ADMIN_PASSWORD:-adminpassword}
+    volumes:
+      - secrets_data:/secrets
+      - db_data:/data
+    depends_on:
+      - openldap
+    networks:
+      - security-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # 1. FRONTEND SERVICE (NGINX Reverse Proxy + Web Portal UI)
+  # ============================================================================
+  frontend:
+    build:
+      context: ./Frontend
+      dockerfile: Dockerfile
+    container_name: security_frontend
+    environment:
+      - API_SECRET=${API_SECRET:-LAB_INITIAL_SECRET_ABC123}
+      - API_UPSTREAM=http://backend:5000
+    ports:
+      - "8080:80"
+    volumes:
+      - secrets_data:/secrets
+    depends_on:
+      - backend
+    networks:
+      - security-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # 4. SECRET ROTATION SERVICE (Coordinates zero-downtime rotation)
+  # ============================================================================
+  rotator:
+    build:
+      context: ./SecretRotation
+      dockerfile: Dockerfile
+    container_name: security_rotator
+    environment:
+      - ROTATION_INTERVAL_SECONDS=${ROTATION_INTERVAL_SECONDS:-120}
+      - LDAP_HOST=openldap
+      - LDAP_PORT=389
+      - LDAP_BASE_DN=dc=example,dc=com
+      - DATABASE_ENCRYPTION_KEY=${DATABASE_ENCRYPTION_KEY:-LAB_ENCRYPTION_KEY_FIXED_2026_DO_NOT_ROTATE}
+      - FRONTEND_CONTAINER=security_frontend
+      - LDAP_CONTAINER=security_openldap
+    volumes:
+      - secrets_data:/secrets
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - openldap
+      - backend
+      - frontend
+    networks:
+      - security-network
+    restart: unless-stopped
+
+volumes:
+  secrets_data:
+  db_data:
+  ldap_data:
+  ldap_config:
+
+networks:
+  security-network:
+    driver: bridge
